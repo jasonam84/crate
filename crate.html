@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CRATE — Music Library</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&family=DM+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="crate.css">
+
+</head>
+<body>
+
+<div id="topbar">
+  <a class="logo" href="#">CRATE<span class="logo-sub">MUSIC LIBRARY</span></a>
+  <nav class="nav-tabs">
+    <button class="nav-tab active" data-page="scan">SCAN</button>
+    <button class="nav-tab" data-page="collection">COLLECTION</button>
+    <button class="nav-tab" data-page="stats">STATS</button>
+    <button class="nav-tab" data-page="wishlist">WISHLIST</button>
+  </nav>
+  <div class="topbar-right">
+    <div class="stat-pill" id="pill-vinyl">0 VINYL</div>
+    <div class="stat-pill" id="pill-cd">0 CD</div>
+  </div>
+</div>
+
+<!-- ═══ SCAN PAGE ═══ -->
+<div id="page-scan" class="page active">
+  <div id="scan-left">
+    <div id="hero">
+      <div id="hero-color-bg"></div>
+      <div id="hero-bg">
+        <div class="ring"></div>
+        <div class="ring"></div>
+        <div class="ring"></div>
+      </div>
+
+      <div id="disc-stage">
+        <div id="disc-wrap" onclick="toggleSpin()" title="Click to spin / stop">
+          <div class="disc-face" id="face-vinyl">
+            <div class="grooves">
+              <div class="groove-ring" style="width:280px;height:280px"></div>
+              <div class="groove-ring" style="width:248px;height:248px"></div>
+              <div class="groove-ring" style="width:214px;height:214px"></div>
+              <div class="groove-ring" style="width:180px;height:180px"></div>
+              <div class="groove-ring" style="width:148px;height:148px"></div>
+              <div class="groove-ring" style="width:118px;height:118px"></div>
+              <div class="groove-ring" style="width:90px;height:90px"></div>
+            </div>
+            <div id="disc-label">
+              <div class="label-placeholder">CRATE<br>MUSIC<br>LIBRARY</div>
+            </div>
+            <div id="spindle"></div>
+          </div>
+        </div>
+        <div id="spin-hint">click to spin</div>
+      </div>
+
+      <div id="info-col">
+        <div id="now-tag"><span class="blink"></span>NOW LOADING</div>
+        <div id="big-title">NO ALBUM<br>SELECTED</div>
+        <div id="big-artist">—</div>
+        <div id="meta-row"></div>
+        <div id="tracklist-panel"></div>
+        <div id="hero-btns">
+          <button class="btn btn-gold" id="add-btn" onclick="addToCollection()" disabled>+ ADD TO CRATE</button>
+          <button class="btn btn-ghost" onclick="openEditModal()">EDIT</button>
+          <button class="btn btn-ghost" onclick="clearAlbum()">CLEAR</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="scanner-bar">
+      <div class="bar-label">LOOKUP</div>
+      <div id="scan-row">
+        <div id="scan-wrap">
+          <input id="search-input" type="text" placeholder="barcode, catalog #, or album / artist name..." autocomplete="off" />
+          <div id="results-drop"></div>
+        </div>
+        <button class="btn btn-gold" onclick="doSearch()">SEARCH</button>
+        <button class="btn btn-ghost" onclick="openCam()">CAMERA</button>
+        <button class="btn btn-ghost" onclick="openWishSearch()">WISH</button>
+      </div>
+      <div id="status-bar"><div class="sdot" id="sdot"></div><span id="stext">ready — enter barcode or album title</span></div>
+    </div>
+  </div>
+
+  <div id="crate-panel">
+    <div id="crate-head">
+      <div class="crate-title-txt">MY CRATE</div>
+      <div class="crate-count" id="crate-count">0 records</div>
+    </div>
+    <div id="crate-filter">
+      <button class="filter-btn on" data-f="all" onclick="filterCrate(this)">ALL</button>
+      <button class="filter-btn" data-f="vinyl" onclick="filterCrate(this)">VINYL</button>
+      <button class="filter-btn" data-f="cd" onclick="filterCrate(this)">CD</button>
+      <button class="filter-btn" data-f="loaned" onclick="filterCrate(this)">LOANED</button>
+      <select id="crate-sort" onchange="sortCrate(this.value)">
+        <option value="added">DATE ADDED</option>
+        <option value="alpha">A–Z</option>
+        <option value="year">YEAR</option>
+        <option value="condition">CONDITION</option>
+      </select>
+    </div>
+    <div id="coll-list">
+      <div id="empty-crate">
+        <div class="empty-disc">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><circle cx="14" cy="14" r="12" stroke="#3a3530" stroke-width="1.5"/><circle cx="14" cy="14" r="4" stroke="#3a3530" stroke-width="1.5"/></svg>
+        </div>
+        Your crate is empty.<br>
+        Search or scan to add records.
+      </div>
+    </div>
+    <div id="crate-footer">
+      <button id="shuffle-btn" onclick="shufflePlay()">&#x21BB;&nbsp; WHAT SHOULD I PLAY?</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ COLLECTION PAGE ═══ -->
+<div id="page-collection" class="page">
+  <div id="grid-controls">
+    <input id="grid-search" type="text" placeholder="search your collection..." oninput="renderGrid()" />
+    <button class="grid-filter on" data-gf="all" onclick="gridFilter(this)">ALL</button>
+    <button class="grid-filter" data-gf="vinyl" onclick="gridFilter(this)">VINYL</button>
+    <button class="grid-filter" data-gf="cd" onclick="gridFilter(this)">CD</button>
+    <button class="grid-filter" data-gf="loaned" onclick="gridFilter(this)">LOANED</button>
+    <button class="btn btn-ghost" style="margin-left:auto" onclick="exportCollection()">EXPORT CSV</button>
+  </div>
+  <div id="album-grid"></div>
+  <div id="grid-empty" style="display:none;text-align:center;padding:4rem;color:var(--text3);font-size:12px;line-height:2.5">Nothing here yet.</div>
+</div>
+
+<!-- ═══ STATS PAGE ═══ -->
+<div id="page-stats" class="page">
+  <div class="stats-grid" id="stats-cards"></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;flex-wrap:wrap" id="stats-charts"></div>
+</div>
+
+<!-- ═══ WISHLIST PAGE ═══ -->
+<div id="page-wishlist" class="page">
+  <div id="wish-add-row">
+    <input id="wish-input" type="text" placeholder="search album or artist to add to wishlist..." />
+    <button class="btn btn-gold" onclick="wishSearch()">FIND</button>
+  </div>
+  <div id="wish-results"></div>
+  <div id="wish-list"><div id="wish-empty" class="wish-item" style="justify-content:center;background:transparent;border-color:transparent">Your wishlist is empty.</div></div>
+</div>
+
+<!-- MODALS -->
+<div id="modal-overlay">
+  <div class="modal" id="active-modal"></div>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+<script src="crate.js"></script>
+
+</body>
+</html>
