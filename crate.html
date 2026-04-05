@@ -4,6 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CRATE — Music Library</title>
+<meta name="theme-color" content="#f5efe6">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="CRATE">
+<link rel="manifest" href="manifest.webmanifest">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&family=DM+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="crate.css">
@@ -12,7 +17,7 @@
 <body>
 
 <div id="topbar">
-  <a class="logo" href="#">CRATE<span class="logo-sub">MUSIC LIBRARY</span></a>
+  <a class="logo" href="#scan" id="home-link">CRATE<span class="logo-sub">MUSIC LIBRARY</span></a>
   <nav class="nav-tabs">
     <button class="nav-tab active" data-page="scan">SCAN</button>
     <button class="nav-tab" data-page="collection">COLLECTION</button>
@@ -25,10 +30,18 @@
   </div>
 </div>
 
+<main id="app-main">
+<div id="shared-banner">
+  <div class="shared-banner-copy">READ ONLY SHARE VIEW</div>
+  <button class="btn btn-ghost" onclick="exitSharedView()">EXIT SHARE</button>
+</div>
+
 <!-- ═══ SCAN PAGE ═══ -->
 <div id="page-scan" class="page active">
   <div id="scan-left">
     <div id="hero">
+      <div id="hero-cover-bg"></div>
+      <div id="hero-cover-fade"></div>
       <div id="hero-color-bg"></div>
       <div id="hero-bg">
         <div class="ring"></div>
@@ -38,7 +51,12 @@
 
       <div id="disc-stage">
         <div id="disc-wrap" onclick="toggleSpin()" title="Click to spin / stop">
+          <div id="cd-shell">
+            <div class="cd-shell-face"></div>
+            <div class="cd-shell-edge"></div>
+          </div>
           <div class="disc-face" id="face-vinyl">
+            <div id="disc-cover-art"><img id="disc-cover-img" alt="" /></div>
             <div class="grooves">
               <div class="groove-ring" style="width:280px;height:280px"></div>
               <div class="groove-ring" style="width:248px;height:248px"></div>
@@ -97,6 +115,7 @@
       <button class="filter-btn" data-f="cd" onclick="filterCrate(this)">CD</button>
       <button class="filter-btn" data-f="loaned" onclick="filterCrate(this)">LOANED</button>
       <select id="crate-sort" onchange="sortCrate(this.value)">
+        <option value="manual">MANUAL</option>
         <option value="added">DATE ADDED</option>
         <option value="alpha">A–Z</option>
         <option value="year">YEAR</option>
@@ -126,7 +145,6 @@
     <button class="grid-filter" data-gf="vinyl" onclick="gridFilter(this)">VINYL</button>
     <button class="grid-filter" data-gf="cd" onclick="gridFilter(this)">CD</button>
     <button class="grid-filter" data-gf="loaned" onclick="gridFilter(this)">LOANED</button>
-    <button class="btn btn-ghost" style="margin-left:auto" onclick="exportCollection()">EXPORT CSV</button>
   </div>
   <div id="album-grid"></div>
   <div id="grid-empty" style="display:none;text-align:center;padding:4rem;color:var(--text3);font-size:12px;line-height:2.5">Nothing here yet.</div>
@@ -134,12 +152,19 @@
 
 <!-- ═══ STATS PAGE ═══ -->
 <div id="page-stats" class="page">
+  <div id="share-tools">
+    <button class="btn btn-ghost" onclick="copyShareLink()">SHARE LINK</button>
+  </div>
   <div class="stats-grid" id="stats-cards"></div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;flex-wrap:wrap" id="stats-charts"></div>
 </div>
 
 <!-- ═══ WISHLIST PAGE ═══ -->
 <div id="page-wishlist" class="page">
+  <div id="wish-topbar">
+    <div id="wish-topcopy">A separate want list for records you do not own yet.</div>
+    <button class="btn btn-ghost" id="wish-price-check-btn" onclick="checkWishlistPrices()">CHECK ALERTS</button>
+  </div>
   <div id="wish-add-row">
     <input id="wish-input" type="text" placeholder="search album or artist to add to wishlist..." />
     <button class="btn btn-gold" onclick="wishSearch()">FIND</button>
@@ -147,6 +172,12 @@
   <div id="wish-results"></div>
   <div id="wish-list"><div id="wish-empty" class="wish-item" style="justify-content:center;background:transparent;border-color:transparent">Your wishlist is empty.</div></div>
 </div>
+</main>
+
+<footer id="site-footer">
+  <div id="footer-copy">Take your time. The music keeps.</div>
+  <button class="btn btn-ghost" id="install-app-btn" onclick="installApp()" hidden>INSTALL APP</button>
+</footer>
 
 <!-- MODALS -->
 <div id="modal-overlay">

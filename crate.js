@@ -1,23 +1,43 @@
 // ═══════════ STATE ═══════════
 const STORAGE_KEYS = {
   collection:'crate_v3',
-  wishlist:'crate_wish'
+  wishlist:'crate_wish',
+  barcodeHistory:'crate_barcodes'
 };
 
 let collection = JSON.parse(localStorage.getItem(STORAGE_KEYS.collection)||'[]');
 let wishlist   = JSON.parse(localStorage.getItem(STORAGE_KEYS.wishlist)||'[]');
+let barcodeHistory = JSON.parse(localStorage.getItem(STORAGE_KEYS.barcodeHistory)||'{}');
+const discogsToken = 'nQzwdQndLRdGpdttKIHVukGDCJYNstSqBNxtSAfY';
 let current = null;
 let spinning = false;
 let camStream = null;
 let crateFilter = 'all';
 let gridFilterVal = 'all';
-let sortMode = 'added';
+let sortMode = 'manual';
 let toastTimer = null;
+let dragItemId = null;
+let discRotation = {x:10,y:-22};
+let discDragState = null;
+let suppressSpinToggle = false;
+let isSharedView = false;
+let pendingInstallPrompt = null;
+
+const CONDITION_SCALE = [
+  {value:'', label:'Unrated', score:0, wear:'Unknown'},
+  {value:'P', label:'Poor', score:1, wear:'Heavy wear'},
+  {value:'G', label:'Good', score:2, wear:'Well used'},
+  {value:'VG', label:'VG', score:3, wear:'Visible wear'},
+  {value:'VG+', label:'VG+', score:4, wear:'Light wear'},
+  {value:'NM', label:'NM', score:5, wear:'Nearly flawless'}
+];
 
 // ═══════════ PERSIST ═══════════
 function save(){
+  if(isSharedView) return;
   localStorage.setItem(STORAGE_KEYS.collection, JSON.stringify(collection));
   localStorage.setItem(STORAGE_KEYS.wishlist, JSON.stringify(wishlist));
+  localStorage.setItem(STORAGE_KEYS.barcodeHistory, JSON.stringify(barcodeHistory));
 }
 
 function getAppState(){
@@ -38,27 +58,276 @@ function hasAnyLocalData(){
 }
 
 function refreshUI(){
+  document.body.classList.toggle('shared-view', isSharedView);
   renderCrate();
   renderGrid();
   renderWishlist();
   updatePills();
+  const sortEl=document.getElementById('crate-sort');
+  if(sortEl) sortEl.value=sortMode;
   if(document.getElementById('page-stats').classList.contains('active')) renderStats();
 }
 
-// ═══════════ NAV ═══════════
-document.querySelectorAll('.nav-tab').forEach(btn=>{
-  btn.addEventListener('click',()=>{
-    document.querySelectorAll('.nav-tab').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-    const pg = btn.dataset.page;
-    document.querySelectorAll('.page').forEach(p=>{p.classList.remove('active');p.style.display='none'});
-    const el = document.getElementById('page-'+pg);
-    if(pg==='scan') el.style.display='grid'; else el.style.display='block';
-    el.classList.add('active');
-    if(pg==='collection') renderGrid();
-    if(pg==='stats') renderStats();
-    if(pg==='wishlist') renderWishlist();
+function getMaxManualOrder(){
+  return collection.reduce((max,item)=>Math.max(max, item.manualOrder ?? 0), 0);
+}
+
+function normalizeCollectionOrder(){
+  collection = collection.map((item,index)=>normalizeRecord({
+    ...item,
+    manualOrder: item.manualOrder ?? index + 1
+  }));
+  wishlist = wishlist.map(normalizeWishlistItem);
+  if(!barcodeHistory || typeof barcodeHistory !== 'object' || Array.isArray(barcodeHistory)) barcodeHistory = {};
+}
+
+function getConditionMeta(grade){
+  return CONDITION_SCALE.find(entry=>entry.value===grade) || CONDITION_SCALE[0];
+}
+
+function getConditionScore(item){
+  if(item.conditionGrade) return getConditionMeta(item.conditionGrade).score;
+  return item.conditionRating || 0;
+}
+
+function ratingToGrade(rating){
+  if(rating >= 5) return 'NM';
+  if(rating >= 4) return 'VG+';
+  if(rating >= 3) return 'VG';
+  if(rating >= 2) return 'G';
+  if(rating >= 1) return 'P';
+  return '';
+}
+
+function normalizeRecord(item){
+  const conditionGrade=item.conditionGrade || ratingToGrade(item.conditionRating || 0);
+  return {
+    ...item,
+    conditionGrade,
+    conditionRating:getConditionMeta(conditionGrade).score,
+    barcode:item.barcode || '',
+    notes:item.notes || '',
+    tracklist:Array.isArray(item.tracklist) ? item.tracklist : []
+  };
+}
+
+function normalizeWishlistItem(item){
+  return {
+    ...item,
+    thumb:normalizeImageUrl(item.thumb) || null,
+    cover:normalizeImageUrl(item.cover) || null,
+    alertTarget:item.alertTarget === '' || item.alertTarget === null || item.alertTarget === undefined ? '' : Number(item.alertTarget),
+    lowestPrice:typeof item.lowestPrice === 'number' ? item.lowestPrice : null,
+    numForSale:item.numForSale || 0,
+    lastPriceCheck:item.lastPriceCheck || 0,
+    currency:item.currency || 'USD',
+    notes:item.notes || ''
+  };
+}
+
+function formatPrice(value, currency='USD'){
+  if(typeof value !== 'number' || Number.isNaN(value)) return 'No market price yet';
+  try{
+    return new Intl.NumberFormat(undefined,{style:'currency',currency,maximumFractionDigits:2}).format(value);
+  }catch(e){
+    return `$${value.toFixed(2)}`;
+  }
+}
+
+function renderWearMeter(grade){
+  const meta=getConditionMeta(grade);
+  return `<div class="wear-meter" aria-label="${meta.wear}">
+    ${[1,2,3,4,5].map(step=>`<span class="wear-seg${meta.score>=step?' on':''}"></span>`).join('')}
+  </div>`;
+}
+
+function setThemeColor(r,g,b){
+  const root=document.documentElement;
+  root.style.setProperty('--theme-rgb', `${r}, ${g}, ${b}`);
+  root.style.setProperty('--theme-soft-rgb', `${Math.min(255, r + 28)}, ${Math.min(255, g + 28)}, ${Math.min(255, b + 28)}`);
+  root.style.setProperty('--theme-deep-rgb', `${Math.max(0, r - 38)}, ${Math.max(0, g - 38)}, ${Math.max(0, b - 38)}`);
+}
+
+function resetThemeColor(){
+  setThemeColor(199,154,71);
+}
+
+function applyDiscRotation(){
+  const wrap=document.getElementById('disc-wrap');
+  if(!wrap) return;
+  wrap.style.setProperty('--disc-rotate-x', `${discRotation.x}deg`);
+  wrap.style.setProperty('--disc-rotate-y', `${discRotation.y}deg`);
+}
+
+function resetDiscRotation(isCD=false){
+  discRotation = isCD ? {x:7,y:-14} : {x:10,y:-22};
+  applyDiscRotation();
+}
+
+function applyHeroArt(coverUrl){
+  const coverBg=document.getElementById('hero-cover-bg');
+  if(coverUrl){
+    coverBg.style.backgroundImage=`url("${coverUrl}")`;
+    coverBg.style.opacity='0.52';
+  }else{
+    coverBg.style.backgroundImage='none';
+    coverBg.style.opacity='0';
+  }
+}
+
+function setDiscMode(isCD){
+  const wrap=document.getElementById('disc-wrap');
+  const face=document.getElementById('face-vinyl');
+  const grooves=face.querySelector('.grooves');
+  const lbl=document.getElementById('disc-label');
+  wrap.classList.toggle('mode-cd', isCD);
+  if(isCD){
+    face.style.background='radial-gradient(circle at 35% 30%,#fcfcfc,#d9d9d9 32%,#bababa 55%,#8b8b8b 74%,#dcdcdc 88%,#666)';
+    grooves.style.opacity='0.06';
+    lbl.style.background='rgba(245,245,245,0.9)';
+    lbl.style.border='2px solid rgba(210,210,210,0.95)';
+  }else{
+    face.style.background='radial-gradient(circle at 32% 28%,#2e2e2e,#080808)';
+    grooves.style.opacity='1';
+    lbl.style.background='#0a0a0a';
+    lbl.style.border='2px solid #111';
+  }
+  resetDiscRotation(isCD);
+}
+
+function applyArtworkTheme(imageUrl){
+  applyHeroArt(imageUrl);
+  if(!imageUrl){
+    document.getElementById('hero-color-bg').style.opacity='0';
+    resetThemeColor();
+    return;
+  }
+  const tmpImg=new Image();
+  tmpImg.crossOrigin='anonymous';
+  tmpImg.onload=()=>{
+    try{
+      const c=document.createElement('canvas');
+      c.width=c.height=12;
+      const ctx=c.getContext('2d');
+      ctx.drawImage(tmpImg,0,0,12,12);
+      const data=ctx.getImageData(0,0,12,12).data;
+      let r=0,g=0,b=0,pixels=0;
+      for(let i=0;i<data.length;i+=4){
+        r+=data[i];
+        g+=data[i+1];
+        b+=data[i+2];
+        pixels++;
+      }
+      r=Math.round(r/pixels);
+      g=Math.round(g/pixels);
+      b=Math.round(b/pixels);
+      setThemeColor(r,g,b);
+      const bg=document.getElementById('hero-color-bg');
+      bg.style.background=`radial-gradient(circle at 30% 30%, rgba(${r},${g},${b},0.34), transparent 62%), linear-gradient(135deg, rgba(${r},${g},${b},0.22), rgba(${Math.max(0,r-40)},${Math.max(0,g-40)},${Math.max(0,b-40)},0.08))`;
+      bg.style.opacity='1';
+    }catch(e){
+      resetThemeColor();
+    }
+  };
+  tmpImg.onerror=()=>resetThemeColor();
+  tmpImg.src=imageUrl;
+}
+
+function applyArtworkWithFallback(primaryUrl, fallbackUrl, onApply, onClear){
+  const primary = normalizeImageUrl(primaryUrl);
+  const fallback = normalizeImageUrl(fallbackUrl);
+  if(primary){
+    onApply(primary, ()=>{
+      if(fallback && fallback !== primary) onApply(fallback, onClear);
+      else onClear();
+    });
+    return;
+  }
+  if(fallback){
+    onApply(fallback, onClear);
+    return;
+  }
+  onClear();
+}
+
+function applyDiscArtwork(primaryUrl, fallbackUrl, fallbackText='CRATE'){
+  const wrap=document.getElementById('disc-wrap');
+  const img=document.getElementById('disc-cover-img');
+  const lbl=document.getElementById('disc-label');
+  applyArtworkWithFallback(primaryUrl, fallbackUrl, (url, onError)=>{
+    img.onload=()=>{wrap.classList.add('has-art');};
+    img.onerror=()=>{
+      img.removeAttribute('src');
+      wrap.classList.remove('has-art');
+      onError();
+    };
+    img.src=url;
+  }, ()=>{
+    img.removeAttribute('src');
+    wrap.classList.remove('has-art');
   });
+  lbl.innerHTML=`<div class="label-placeholder">${fallbackText.substring(0,12).toUpperCase()}</div>`;
+}
+
+function applyHeroArtwork(primaryUrl, fallbackUrl){
+  applyArtworkWithFallback(primaryUrl, fallbackUrl, (url, onError)=>{
+    const tmpImg=new Image();
+    tmpImg.crossOrigin='anonymous';
+    tmpImg.onload=()=>{
+      applyHeroArt(url);
+      try{
+        const c=document.createElement('canvas');
+        c.width=c.height=12;
+        const ctx=c.getContext('2d');
+        ctx.drawImage(tmpImg,0,0,12,12);
+        const data=ctx.getImageData(0,0,12,12).data;
+        let r=0,g=0,b=0,pixels=0;
+        for(let i=0;i<data.length;i+=4){
+          r+=data[i];
+          g+=data[i+1];
+          b+=data[i+2];
+          pixels++;
+        }
+        r=Math.round(r/pixels);
+        g=Math.round(g/pixels);
+        b=Math.round(b/pixels);
+        setThemeColor(r,g,b);
+        const bg=document.getElementById('hero-color-bg');
+        bg.style.background=`radial-gradient(circle at 30% 30%, rgba(${r},${g},${b},0.34), transparent 62%), linear-gradient(135deg, rgba(${r},${g},${b},0.22), rgba(${Math.max(0,r-40)},${Math.max(0,g-40)},${Math.max(0,b-40)},0.08))`;
+        bg.style.opacity='1';
+      }catch(e){
+        resetThemeColor();
+      }
+    };
+    tmpImg.onerror=onError;
+    tmpImg.src=url;
+  }, ()=>{
+    applyHeroArt(null);
+    document.getElementById('hero-color-bg').style.opacity='0';
+    resetThemeColor();
+  });
+}
+
+// ═══════════ NAV ═══════════
+function showPage(pg){
+  document.querySelectorAll('.nav-tab').forEach(b=>b.classList.toggle('active', b.dataset.page===pg));
+  document.querySelectorAll('.page').forEach(p=>{p.classList.remove('active');p.style.display='none';});
+  const el = document.getElementById('page-'+pg);
+  if(!el) return;
+  if(pg==='scan') el.style.display='grid'; else el.style.display='block';
+  el.classList.add('active');
+  if(pg==='collection') renderGrid();
+  if(pg==='stats') renderStats();
+  if(pg==='wishlist') renderWishlist();
+}
+
+document.querySelectorAll('.nav-tab').forEach(btn=>{
+  btn.addEventListener('click',()=>showPage(btn.dataset.page));
+});
+
+document.getElementById('home-link')?.addEventListener('click',event=>{
+  event.preventDefault();
+  showPage('scan');
 });
 
 // ═══════════ STATUS ═══════════
@@ -81,7 +350,102 @@ function discogsUrl(path, params={}){
   Object.entries(params).forEach(([key,val])=>{
     if(val !== undefined && val !== null && val !== '') url.searchParams.set(key, val);
   });
+  if(discogsToken) url.searchParams.set('token', discogsToken);
   return url.toString();
+}
+
+function normalizeImageUrl(url){
+  if(!url) return null;
+  return String(url).replace(/^http:\/\//i, 'https://');
+}
+
+function ensureEditable(){
+  if(!isSharedView) return true;
+  toast('Read-only share view');
+  return false;
+}
+
+function encodeShareState(payload){
+  return btoa(unescape(encodeURIComponent(JSON.stringify(payload))))
+    .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+
+function decodeShareState(value){
+  const normalized=value.replace(/-/g,'+').replace(/_/g,'/');
+  const padded=normalized + '='.repeat((4 - normalized.length % 4) % 4);
+  return JSON.parse(decodeURIComponent(escape(atob(padded))));
+}
+
+function getShareableCollection(){
+  return collection.map(item=>({
+    id:item.id,
+    title:item.title,
+    artist:item.artist,
+    album:item.album,
+    year:item.year,
+    format:item.format,
+    cover:item.cover || null,
+    thumb:item.thumb || null,
+    country:item.country || '',
+    genre:item.genre || '',
+    label:item.label || '',
+    conditionRating:item.conditionRating || 0,
+    notes:item.notes || '',
+    loaned:!!item.loaned,
+    loanedTo:item.loanedTo || '',
+    addedAt:item.addedAt || 0,
+    manualOrder:item.manualOrder || 0
+  }));
+}
+
+function buildShareLink(){
+  const payload={
+    v:1,
+    crate:getShareableCollection(),
+    sharedAt:new Date().toISOString()
+  };
+  return `${location.origin}${location.pathname}#share=${encodeShareState(payload)}`;
+}
+
+async function copyShareLink(){
+  if(!collection.length){toast('Add records first');return;}
+  const link=buildShareLink();
+  try{
+    await navigator.clipboard.writeText(link);
+    toast('Share link copied');
+  }catch(e){
+    prompt('Copy this share link:', link);
+  }
+}
+
+function loadSharedViewFromHash(){
+  const match=location.hash.match(/^#share=(.+)$/);
+  if(!match) return false;
+  try{
+    const payload=decodeShareState(match[1]);
+    if(!Array.isArray(payload.crate)) return false;
+    collection = payload.crate;
+    wishlist = [];
+    normalizeCollectionOrder();
+    isSharedView = true;
+    sortMode='manual';
+    return true;
+  }catch(e){
+    console.error('Invalid share payload', e);
+    return false;
+  }
+}
+
+function exitSharedView(){
+  if(!isSharedView) return;
+  location.hash='';
+  isSharedView=false;
+  collection = JSON.parse(localStorage.getItem(STORAGE_KEYS.collection)||'[]');
+  wishlist = JSON.parse(localStorage.getItem(STORAGE_KEYS.wishlist)||'[]');
+  barcodeHistory = JSON.parse(localStorage.getItem(STORAGE_KEYS.barcodeHistory)||'{}');
+  normalizeCollectionOrder();
+  refreshUI();
+  toast('Returned to your crate');
 }
 
 // ═══════════ SEARCH ═══════════
@@ -93,18 +457,30 @@ async function doSearch(){
 }
 
 async function lookupBarcode(code){
+  const known = barcodeHistory[code];
+  if(known?.recordId){
+    const existing=collection.find(item=>item.id===known.recordId);
+    if(existing){
+      loadItemById(existing.id);
+      setStatus('barcode already in your crate','ok');
+      toast(`Already scanned: ${existing.album}`);
+      return;
+    }
+  }
   setStatus('looking up '+code+'...','active');
   try{
     const r = await fetch(discogsUrl('database/search',{barcode:code,per_page:8}));
     const d = await r.json();
     if(d.results&&d.results.length>0){
-      if(d.results.length===1) loadResult(d.results[0]);
-      else showResultsDrop(d.results);
+      const prepared=d.results.map(result=>({...result,_scannedBarcode:code}));
+      if(prepared.length===1) loadResult(prepared[0]);
+      else showResultsDrop(prepared);
     } else { setStatus('no results for '+code,'err'); toast('Not found'); }
   }catch(e){setStatus('lookup failed','err');}
 }
 
 async function searchTitle(q, showDrop=false){
+  current = current ? {...current, barcode:''} : current;
   setStatus('searching for "'+q+'"...','active');
   try{
     const r = await fetch(discogsUrl('database/search',{q,type:'release',per_page:8}));
@@ -123,8 +499,9 @@ function showResultsDrop(results){
     const artist=parts[0]||'Unknown';
     const album=parts[1]||parts[0]||'Unknown';
     const fmt=r.format?r.format[0]:'';
+    const thumb=normalizeImageUrl(r.thumb);
     return `<div class="result-item" onclick="pickResult(${i})">
-      ${r.thumb?`<img class="result-thumb" src="${r.thumb}" alt="" />`:`<div class="result-thumb" style="border-radius:50%;background:radial-gradient(circle,#1e1e1e,#080808)"></div>`}
+      ${thumb?`<img class="result-thumb" src="${thumb}" alt="" />`:`<div class="result-thumb" style="border-radius:50%;background:radial-gradient(circle,#1e1e1e,#080808)"></div>`}
       <div class="result-info">
         <div class="result-title">${album}</div>
         <div class="result-sub">${artist} · ${r.year||'?'} · ${fmt}</div>
@@ -151,65 +528,34 @@ function loadResult(item){
   const artist=parts[0]||'Unknown';
   const album=parts[1]||parts[0]||'Unknown';
   const fmt=item.format?item.format[0]:'Vinyl';
-  current = {
+  current = normalizeRecord({
     id:item.id||Date.now(),
     title:item.title||'Unknown',
     artist, album,
     year:item.year||'',
     format:fmt,
-    cover:item.cover_image||null,
-    thumb:item.thumb||null,
+    cover:normalizeImageUrl(item.cover_image)||null,
+    thumb:normalizeImageUrl(item.thumb)||null,
     country:item.country||'',
     genre:item.genre?item.genre[0]:'',
     label:item.label?item.label[0]:'',
     condition:'',
-    notes:'',
-    loaned:false,
-    loanedTo:'',
-    plays:0,
-    addedAt: Date.now(),
-    tracklist:[],
-  };
+    conditionGrade:item.conditionGrade || '',
+    notes:item.notes || '',
+    loaned:!!item.loaned,
+    loanedTo:item.loanedTo || '',
+    barcode:item._scannedBarcode || item.barcode || '',
+    addedAt: item.addedAt || Date.now(),
+    manualOrder:item.manualOrder || getMaxManualOrder()+1,
+    tracklist:Array.isArray(item.tracklist) ? item.tracklist : [],
+  });
 
   // update disc
-  const lbl = document.getElementById('disc-label');
-  const img = document.createElement('img');
-  img.src = current.thumb||'';
-  img.onerror=()=>{lbl.innerHTML=`<div class="label-placeholder">${album.substring(0,12).toUpperCase()}</div>`};
-  if(current.thumb){lbl.innerHTML='';lbl.appendChild(img);}
-  else{lbl.innerHTML=`<div class="label-placeholder">${album.substring(0,12).toUpperCase()}</div>`;}
+  applyDiscArtwork(current.cover, current.thumb, album);
 
   const isCD = fmt.toLowerCase().includes('cd');
-  const face = document.getElementById('face-vinyl');
-  if(isCD){
-    face.style.background='radial-gradient(circle at 35% 30%,#e0e0e0,#aaa 40%,#888 70%,#666)';
-    face.querySelector('.grooves').style.opacity='0.1';
-    lbl.style.background='#ccc';
-    lbl.style.border='2px solid #bbb';
-  } else {
-    face.style.background='radial-gradient(circle at 32% 28%,#2e2e2e,#080808)';
-    face.querySelector('.grooves').style.opacity='1';
-    lbl.style.background='#0a0a0a';
-    lbl.style.border='2px solid #111';
-  }
-
-  // extract color from image for bg tint
-  if(current.cover){
-    const tmpImg=new Image();tmpImg.crossOrigin='anonymous';
-    tmpImg.onload=()=>{
-      try{
-        const c=document.createElement('canvas');c.width=c.height=4;
-        const ctx=c.getContext('2d');ctx.drawImage(tmpImg,0,0,4,4);
-        const px=ctx.getImageData(0,0,1,1).data;
-        const col=`rgb(${px[0]},${px[1]},${px[2]})`;
-        const bg=document.getElementById('hero-color-bg');
-        bg.style.background=col;bg.style.opacity='0.12';
-      }catch(e){}
-    };
-    tmpImg.src=current.cover;
-  } else {
-    document.getElementById('hero-color-bg').style.opacity='0';
-  }
+  setDiscMode(isCD);
+  applyHeroArtwork(current.cover, current.thumb);
 
   // title animate
   const titleEl=document.getElementById('big-title');
@@ -246,7 +592,6 @@ function loadResult(item){
   spinning=false;
   const dw=document.getElementById('disc-wrap');
   dw.classList.remove('spinning');
-  dw.style.transform='rotateY(-22deg) rotateX(10deg)';
 }
 
 async function fetchTracklist(id){
@@ -269,6 +614,10 @@ async function fetchTracklist(id){
 
 // ═══════════ DISC SPIN ═══════════
 function toggleSpin(){
+  if(suppressSpinToggle){
+    suppressSpinToggle=false;
+    return;
+  }
   if(!current){toast('Scan an album first');return;}
   spinning=!spinning;
   const dw=document.getElementById('disc-wrap');
@@ -280,14 +629,51 @@ function toggleSpin(){
   }
 }
 
+function startDiscDrag(event){
+  const wrap=document.getElementById('disc-wrap');
+  if(!wrap) return;
+  discDragState = {
+    pointerId:event.pointerId,
+    startX:event.clientX,
+    startY:event.clientY,
+    startRotateX:discRotation.x,
+    startRotateY:discRotation.y,
+    moved:false
+  };
+  wrap.classList.add('dragging');
+  wrap.setPointerCapture(event.pointerId);
+}
+
+function moveDiscDrag(event){
+  if(!discDragState || discDragState.pointerId!==event.pointerId) return;
+  const dx=event.clientX-discDragState.startX;
+  const dy=event.clientY-discDragState.startY;
+  if(Math.abs(dx)>2 || Math.abs(dy)>2) discDragState.moved=true;
+  discRotation.y = Math.max(-75, Math.min(75, discDragState.startRotateY + dx * 0.35));
+  discRotation.x = Math.max(-50, Math.min(50, discDragState.startRotateX - dy * 0.35));
+  applyDiscRotation();
+}
+
+function endDiscDrag(event){
+  if(!discDragState || discDragState.pointerId!==event.pointerId) return;
+  const wrap=document.getElementById('disc-wrap');
+  if(wrap){
+    wrap.classList.remove('dragging');
+    try{wrap.releasePointerCapture(event.pointerId);}catch(e){}
+  }
+  if(discDragState.moved) suppressSpinToggle=true;
+  discDragState = null;
+}
+
 function clearAlbum(){
   current=null;spinning=false;
   const dw=document.getElementById('disc-wrap');
   dw.classList.remove('spinning');
-  dw.style.transform='rotateY(-22deg) rotateX(10deg)';
+  dw.classList.remove('mode-cd');
+  dw.classList.remove('has-art');
   document.getElementById('disc-label').innerHTML='<div class="label-placeholder">CRATE<br>MUSIC<br>LIBRARY</div>';
-  document.getElementById('face-vinyl').style.background='radial-gradient(circle at 32% 28%,#2e2e2e,#080808)';
-  document.getElementById('face-vinyl').querySelector('.grooves').style.opacity='1';
+  document.getElementById('disc-cover-img').removeAttribute('src');
+  setDiscMode(false);
   document.getElementById('big-title').textContent='NO ALBUM\nSELECTED';
   document.getElementById('big-title').classList.remove('loaded');
   document.getElementById('big-artist').textContent='—';
@@ -297,14 +683,28 @@ function clearAlbum(){
   document.getElementById('add-btn').disabled=true;
   document.getElementById('add-btn').textContent='+ ADD TO CRATE';
   document.getElementById('hero-color-bg').style.opacity='0';
+  document.getElementById('hero-cover-bg').style.opacity='0';
+  document.getElementById('hero-cover-bg').style.backgroundImage='none';
+  resetThemeColor();
+  resetDiscRotation(false);
   setStatus('cleared');
 }
 
 // ═══════════ COLLECTION ═══════════
 function addToCollection(){
+  if(!ensureEditable()) return;
   if(!current)return;
   if(collection.find(c=>c.id===current.id)){toast('Already in crate!');return;}
-  collection.push({...current,plays:0,addedAt:Date.now()});
+  const item=normalizeRecord({...current,addedAt:Date.now(),manualOrder:getMaxManualOrder()+1});
+  collection.push(item);
+  if(item.barcode){
+    barcodeHistory[item.barcode]={
+      recordId:item.id,
+      album:item.album,
+      artist:item.artist,
+      scannedAt:Date.now()
+    };
+  }
   save(); renderCrate(); updatePills();
   document.getElementById('add-btn').textContent='✓ IN CRATE';
   document.getElementById('add-btn').disabled=true;
@@ -312,13 +712,18 @@ function addToCollection(){
 }
 
 function removeItem(id, e){
+  if(!ensureEditable()) return;
   e&&e.stopPropagation();
+  Object.keys(barcodeHistory).forEach(code=>{
+    if(barcodeHistory[code]?.recordId===id) delete barcodeHistory[code];
+  });
   collection=collection.filter(c=>c.id!==id);
   save(); renderCrate(); updatePills();
   toast('Removed from crate');
 }
 
 function toggleLoan(id, e){
+  if(!ensureEditable()) return;
   e&&e.stopPropagation();
   const item=collection.find(c=>c.id===id);
   if(!item)return;
@@ -337,6 +742,8 @@ function editItem(id, e){
 }
 
 function showEditModal(item){
+  const grade=item.conditionGrade || ratingToGrade(item.conditionRating || 0);
+  const meta=getConditionMeta(grade);
   const m=document.getElementById('active-modal');
   m.innerHTML=`
     <div class="modal-title">EDIT RECORD</div>
@@ -350,39 +757,50 @@ function showEditModal(item){
       </select>
     </div>
     <div class="modal-field"><label class="modal-label">CONDITION</label>
-      <div class="stars" id="e-stars">${[1,2,3,4,5].map(n=>`<span class="star${(item.conditionRating||0)>=n?' on':''}" onclick="rateStar(${n})">${n<=5?'★':''}</span>`).join('')}</div>
+      <select class="modal-select" id="e-condition-grade" onchange="updateConditionPreview(this.value)">
+        ${CONDITION_SCALE.map(entry=>`<option value="${entry.value}" ${entry.value===grade?'selected':''}>${entry.label}</option>`).join('')}
+      </select>
+      <div class="condition-preview" id="condition-preview">
+        <div class="condition-pill">${meta.label}</div>
+        ${renderWearMeter(grade)}
+        <div class="condition-copy">${meta.wear}</div>
+      </div>
     </div>
     <div class="modal-field"><label class="modal-label">NOTES</label><textarea class="modal-textarea" id="e-notes">${item.notes||''}</textarea></div>
     <div class="modal-btns">
       <button class="btn btn-ghost" onclick="closeModal()">CANCEL</button>
       <button class="btn btn-gold" onclick="saveEdit(${item.id})">SAVE</button>
     </div>`;
-  window._editRating = item.conditionRating||0;
   openModal();
 }
 
-function rateStar(n){
-  window._editRating=n;
-  document.querySelectorAll('#e-stars .star').forEach((s,i)=>{s.classList.toggle('on',i<n);});
+function updateConditionPreview(grade){
+  const meta=getConditionMeta(grade);
+  const preview=document.getElementById('condition-preview');
+  if(!preview) return;
+  preview.innerHTML=`<div class="condition-pill">${meta.label}</div>${renderWearMeter(grade)}<div class="condition-copy">${meta.wear}</div>`;
 }
 
 function saveEdit(id){
+  if(!ensureEditable()) return;
   const item=collection.find(c=>c.id===id);
   if(!item)return;
   item.album=document.getElementById('e-album').value||item.album;
   item.artist=document.getElementById('e-artist').value||item.artist;
   item.year=document.getElementById('e-year').value||item.year;
   item.format=document.getElementById('e-format').value;
-  item.conditionRating=window._editRating||0;
+  item.conditionGrade=document.getElementById('e-condition-grade').value;
+  item.conditionRating=getConditionMeta(item.conditionGrade).score;
   item.notes=document.getElementById('e-notes').value;
   item.title=item.artist+' - '+item.album;
+  if(item.manualOrder === undefined) item.manualOrder=getMaxManualOrder()+1;
   save(); renderCrate(); renderGrid();
   closeModal(); toast('Saved!');
 }
 
 function openEditModal(){
   if(!current){toast('Load an album first');return;}
-  const fake={...current,conditionRating:0};
+  const fake={...current,conditionGrade:current.conditionGrade || '',conditionRating:getConditionMeta(current.conditionGrade || '').score};
   showEditModal({...fake, id:current.id});
 }
 
@@ -398,20 +816,22 @@ function renderCrate(){
   }
   list.innerHTML=items.map((item,i)=>{
     const isCD=/cd/i.test(item.format);
+    const dragEnabled = sortMode==='manual' && crateFilter==='all';
     const thumbHTML=item.thumb
       ?`<img src="${item.thumb}" alt="" onerror="this.style.display='none'" />`
       :`<div class="vinyl-mini"></div>`;
-    const cond=item.conditionRating?'★'.repeat(item.conditionRating):'';
+    const conditionMeta=getConditionMeta(item.conditionGrade || ratingToGrade(item.conditionRating || 0));
     const loanBadge=item.loaned?`<span class="format-badge badge-l" title="${item.loanedTo}">LOANED</span>`
       :`<span class="format-badge ${isCD?'badge-c':'badge-v'}">${isCD?'CD':'VINYL'}</span>`;
-    return `<div class="coll-item${item.loaned?' loaned':''}" id="ci-${item.id}" onclick="loadItemById(${item.id})" style="animation-delay:${Math.min(i,12)*0.04}s">
+    return `<div class="coll-item${item.loaned?' loaned':''}${dragEnabled?' draggable':''}" id="ci-${item.id}" onclick="loadItemById(${item.id})" style="animation-delay:${Math.min(i,12)*0.04}s" draggable="${dragEnabled}" ondragstart="handleCrateDragStart(event, ${item.id})" ondragover="handleCrateDragOver(event, ${item.id})" ondrop="handleCrateDrop(event, ${item.id})" ondragend="handleCrateDragEnd()">
       <div class="item-art">${thumbHTML}</div>
       <div class="item-data">
         <div class="item-album">${item.album}</div>
         <div class="item-artist">${item.artist}${item.year?' · '+item.year:''}</div>
         ${item.notes?`<div class="item-note">${item.notes.substring(0,40)}</div>`:''}
-        ${cond?`<div style="color:var(--gold);font-size:10px;letter-spacing:0">${cond}</div>`:''}
+        ${conditionMeta.score?`<div class="condition-row"><span class="condition-pill">${conditionMeta.label}</span>${renderWearMeter(conditionMeta.value)}</div>`:''}
         <div class="item-actions">
+          ${dragEnabled?'<button class="ia drag-handle" title="Drag to reorder" onclick="event.stopPropagation()" onmousedown="event.stopPropagation()">DRAG</button>':''}
           <button class="ia" onclick="editItem(${item.id},event)">EDIT</button>
           <button class="ia" onclick="toggleLoan(${item.id},event)">${item.loaned?'RETURN':'LOAN'}</button>
           <button class="ia del" onclick="removeItem(${item.id},event)">REMOVE</button>
@@ -427,9 +847,10 @@ function filterAndSort(arr, f){
   if(f==='vinyl') res=res.filter(c=>!/cd/i.test(c.format));
   else if(f==='cd') res=res.filter(c=>/cd/i.test(c.format));
   else if(f==='loaned') res=res.filter(c=>c.loaned);
-  if(sortMode==='alpha') res.sort((a,b)=>a.album.localeCompare(b.album));
+  if(sortMode==='manual') res.sort((a,b)=>(a.manualOrder??0)-(b.manualOrder??0));
+  else if(sortMode==='alpha') res.sort((a,b)=>a.album.localeCompare(b.album));
   else if(sortMode==='year') res.sort((a,b)=>(b.year||0)-(a.year||0));
-  else if(sortMode==='condition') res.sort((a,b)=>(b.conditionRating||0)-(a.conditionRating||0));
+  else if(sortMode==='condition') res.sort((a,b)=>getConditionScore(b)-getConditionScore(a));
   else res.sort((a,b)=>(b.addedAt||0)-(a.addedAt||0));
   return res;
 }
@@ -443,6 +864,48 @@ function filterCrate(btn){
 
 function sortCrate(val){sortMode=val;renderCrate();}
 
+function reindexManualOrder(ids){
+  const indexMap=new Map(ids.map((id,index)=>[id,index+1]));
+  collection = collection.map(item=>indexMap.has(item.id)?{...item,manualOrder:indexMap.get(item.id)}:item);
+}
+
+function handleCrateDragStart(event,id){
+  if(sortMode!=='manual' || crateFilter!=='all') return;
+  dragItemId=id;
+  event.dataTransfer.effectAllowed='move';
+  event.dataTransfer.setData('text/plain', String(id));
+  event.currentTarget.classList.add('dragging');
+}
+
+function handleCrateDragOver(event,id){
+  if(sortMode!=='manual' || crateFilter!=='all' || dragItemId===null || dragItemId===id) return;
+  event.preventDefault();
+  document.querySelectorAll('.coll-item.drag-target').forEach(el=>el.classList.remove('drag-target'));
+  event.currentTarget.classList.add('drag-target');
+}
+
+function handleCrateDrop(event,targetId){
+  if(!ensureEditable()) return;
+  if(sortMode!=='manual' || crateFilter!=='all' || dragItemId===null || dragItemId===targetId) return;
+  event.preventDefault();
+  const ordered=filterAndSort(collection,'all').map(item=>item.id);
+  const fromIndex=ordered.indexOf(dragItemId);
+  const toIndex=ordered.indexOf(targetId);
+  if(fromIndex===-1 || toIndex===-1) return;
+  ordered.splice(toIndex,0,ordered.splice(fromIndex,1)[0]);
+  reindexManualOrder(ordered);
+  save();
+  renderCrate();
+  renderGrid();
+}
+
+function handleCrateDragEnd(){
+  dragItemId=null;
+  document.querySelectorAll('.coll-item.dragging,.coll-item.drag-target').forEach(el=>{
+    el.classList.remove('dragging','drag-target');
+  });
+}
+
 function loadItemById(id){
   const item=collection.find(c=>c.id===id);
   if(!item)return;
@@ -453,7 +916,15 @@ function loadItemById(id){
     cover_image:item.cover,thumb:item.thumb,
     year:item.year,format:item.format?[item.format]:['Vinyl'],
     country:item.country,genre:item.genre?[item.genre]:undefined,
-    label:item.label?[item.label]:undefined
+    label:item.label?[item.label]:undefined,
+    barcode:item.barcode || '',
+    conditionGrade:item.conditionGrade || '',
+    notes:item.notes || '',
+    loaned:item.loaned,
+    loanedTo:item.loanedTo,
+    addedAt:item.addedAt,
+    manualOrder:item.manualOrder,
+    tracklist:item.tracklist || []
   });
   document.getElementById('add-btn').textContent='✓ IN CRATE';
   document.getElementById('add-btn').disabled=true;
@@ -464,13 +935,7 @@ function shufflePlay(){
   const avail=collection.filter(c=>!c.loaned);
   if(!avail.length){toast('Add some records first!');return;}
   // weighted: prefer less-played
-  const maxPlays=Math.max(...avail.map(c=>c.plays||0),1);
-  const weights=avail.map(c=>maxPlays-(c.plays||0)+1);
-  const total=weights.reduce((a,b)=>a+b,0);
-  let rand=Math.random()*total;
-  let pick=avail[0];
-  for(let i=0;i<avail.length;i++){rand-=weights[i];if(rand<=0){pick=avail[i];break;}}
-  const idx=collection.indexOf(pick);
+  const pick=avail[Math.floor(Math.random()*avail.length)];
   loadItemById(pick.id);
   setTimeout(()=>{
     spinning=true;
@@ -490,14 +955,18 @@ function renderGrid(){
   empty.style.display='none';
   grid.innerHTML=items.map((item,i)=>{
     const isCD=/cd/i.test(item.format);
-    return `<div class="grid-card" onclick="goToScanAndLoad(${item.id})" style="animation-delay:${Math.min(i,20)*0.03}s">
-      ${item.cover
-        ?`<img class="grid-card-art" src="${item.cover}" alt="${item.album}" onerror="this.outerHTML='<div class=grid-card-art-placeholder><div class=vinyl-thumb-svg></div></div>'" />`
+    const cover=normalizeImageUrl(item.cover);
+    const conditionMeta=getConditionMeta(item.conditionGrade || ratingToGrade(item.conditionRating || 0));
+    return `<div class="grid-card" onclick="goToScanAndLoad(${item.id})" style="animation-delay:${Math.min(i,20)*0.03}s;--cover-delay:${Math.min(i,20)*0.03}s">
+      ${cover
+        ?`<img class="grid-card-art" src="${cover}" alt="${item.album}" onerror="this.outerHTML='<div class=grid-card-art-placeholder><div class=vinyl-thumb-svg></div></div>'" />`
         :`<div class="grid-card-art-placeholder"><div class="vinyl-thumb-svg"></div></div>`}
+      <div class="grid-card-glow" ${cover?`style="background-image:url('${cover.replace(/'/g,"&#39;")}')"`:''}></div>
       ${item.loaned?'<div class="loan-overlay">LOANED</div>':''}
       <div class="grid-card-info">
         <div class="gc-album">${item.album}</div>
         <div class="gc-artist">${item.artist}</div>
+        ${conditionMeta.score?`<div class="grid-condition"><span class="condition-pill">${conditionMeta.label}</span>${renderWearMeter(conditionMeta.value)}</div>`:''}
         <div class="gc-foot">
           <div class="gc-year">${item.year||''}</div>
           <span class="grid-badge ${isCD?'badge-c':'badge-v'} format-badge">${isCD?'CD':'VINYL'}</span>
@@ -515,7 +984,7 @@ function gridFilter(btn){
 }
 
 function goToScanAndLoad(id){
-  document.querySelector('[data-page="scan"]').click();
+  showPage('scan');
   setTimeout(()=>loadItemById(id),100);
 }
 
@@ -525,8 +994,9 @@ function renderStats(){
   const vinyls=collection.filter(c=>!/cd/i.test(c.format)).length;
   const cds=total-vinyls;
   const loaned=collection.filter(c=>c.loaned).length;
+  const graded=collection.filter(c=>getConditionScore(c)>0).length;
   document.getElementById('stats-cards').innerHTML=[
-    ['TOTAL RECORDS',total],['VINYL',vinyls],['CD',cds],['LOANED OUT',loaned]
+    ['TOTAL RECORDS',total],['VINYL',vinyls],['CD',cds],['GRADED',graded],['WISHLIST',wishlist.length],['SCANNED BARCODES',Object.keys(barcodeHistory).length],['LOANED OUT',loaned]
   ].map(([l,v],i)=>`<div class="stat-card" style="animation-delay:${i*0.08}s"><div class="sc-num">${v}</div><div class="sc-label">${l}</div></div>`).join('');
 
   // genre chart
@@ -565,8 +1035,9 @@ async function wishSearch(){
     r.innerHTML=d.results.map((it,i)=>{
       const parts=(it.title||'').split(' - ');
       const artist=parts[0];const album=parts[1]||parts[0];
+      const thumb=normalizeImageUrl(it.thumb);
       return `<div class="result-item" onclick="addToWishlist(${i})">
-        ${it.thumb?`<img class="result-thumb" src="${it.thumb}" alt="" />`:`<div class="result-thumb"></div>`}
+        ${thumb?`<img class="result-thumb" src="${thumb}" alt="" />`:`<div class="result-thumb"></div>`}
         <div class="result-info"><div class="result-title">${album}</div><div class="result-sub">${artist} · ${it.year||'?'}</div></div>
         <button class="btn btn-ghost" style="flex-shrink:0;padding:5px 10px;font-size:9px" onclick="addToWishlist(${i});event.stopPropagation()">+ WISH</button>
       </div>`;
@@ -576,32 +1047,85 @@ async function wishSearch(){
 }
 
 function addToWishlist(i){
+  if(!ensureEditable()) return;
   const it=window._wishResults[i];
   const parts=(it.title||'').split(' - ');
   const artist=parts[0];const album=parts[1]||parts[0];
   if(wishlist.find(w=>w.id===it.id)){toast('Already on wishlist');return;}
-  wishlist.push({id:it.id,title:it.title,artist,album,year:it.year||'',thumb:it.thumb||null,cover:it.cover_image||null,addedAt:Date.now()});
+  wishlist.push(normalizeWishlistItem({id:it.id,title:it.title,artist,album,year:it.year||'',thumb:normalizeImageUrl(it.thumb)||null,cover:normalizeImageUrl(it.cover_image)||null,addedAt:Date.now(),alertTarget:''}));
   save();renderWishlist();
   document.getElementById('wish-results').style.display='none';
   toast('Added to wishlist: '+album);
+  refreshWishlistPrice(it.id);
 }
 
 function removeWish(id,e){
+  if(!ensureEditable()) return;
   e&&e.stopPropagation();
   wishlist=wishlist.filter(w=>w.id!==id);
   save();renderWishlist();
 }
 
 function moveWishToCrate(id,e){
+  if(!ensureEditable()) return;
   e&&e.stopPropagation();
   const item=wishlist.find(w=>w.id===id);
   if(!item)return;
   if(!collection.find(c=>c.id===id)){
-    collection.push({...item,format:'Vinyl',condition:'',notes:'',loaned:false,loanedTo:'',plays:0,tracklist:[]});
+    collection.push(normalizeRecord({...item,format:'Vinyl',condition:'',conditionGrade:'',notes:item.notes||'',loaned:false,loanedTo:'',plays:0,tracklist:[],manualOrder:getMaxManualOrder()+1}));
     wishlist=wishlist.filter(w=>w.id!==id);
     save();renderWishlist();renderCrate();updatePills();
     toast('Moved to crate: '+item.album);
   } else {toast('Already in crate!');}
+}
+
+function setWishAlertTarget(id, value){
+  if(!ensureEditable()) return;
+  const item=wishlist.find(w=>w.id===id);
+  if(!item) return;
+  const normalized=value.trim()==='' ? '' : Math.max(0, Number(value));
+  item.alertTarget=normalized==='' || Number.isNaN(normalized) ? '' : normalized;
+  save();
+  renderWishlist();
+}
+
+async function refreshWishlistPrice(id){
+  const item=wishlist.find(w=>w.id===id);
+  if(!item) return;
+  try{
+    const res=await fetch(discogsUrl(`marketplace/stats/${id}`));
+    const data=await res.json();
+    item.lowestPrice=typeof data.lowest_price === 'number' ? data.lowest_price : null;
+    item.numForSale=typeof data.num_for_sale === 'number' ? data.num_for_sale : 0;
+    item.currency=data.currency || 'USD';
+    item.lastPriceCheck=Date.now();
+    save();
+    renderWishlist();
+  }catch(e){
+    toast('Price check failed');
+  }
+}
+
+async function checkWishlistPrices(){
+  if(!wishlist.length){toast('Wishlist is empty');return;}
+  const btn=document.getElementById('wish-price-check-btn');
+  if(btn) btn.disabled=true;
+  let checked=0;
+  for(const item of wishlist){
+    try{
+      const res=await fetch(discogsUrl(`marketplace/stats/${item.id}`));
+      const data=await res.json();
+      item.lowestPrice=typeof data.lowest_price === 'number' ? data.lowest_price : null;
+      item.numForSale=typeof data.num_for_sale === 'number' ? data.num_for_sale : 0;
+      item.currency=data.currency || 'USD';
+      item.lastPriceCheck=Date.now();
+      checked++;
+    }catch(e){}
+  }
+  save();
+  renderWishlist();
+  if(btn) btn.disabled=false;
+  toast(checked ? `Checked ${checked} wishlist price${checked!==1?'s':''}` : 'Price checks failed');
 }
 
 function renderWishlist(){
@@ -610,19 +1134,33 @@ function renderWishlist(){
     el.innerHTML='<div id="wish-empty" class="wish-item" style="justify-content:center;background:transparent;border-color:transparent">Your wishlist is empty.</div>';
     return;
   }
-  el.innerHTML=wishlist.map((item,i)=>`
+  el.innerHTML=wishlist.map((item,i)=>{
+    const belowTarget=typeof item.lowestPrice==='number' && typeof item.alertTarget==='number' && item.alertTarget>0 && item.lowestPrice<=item.alertTarget;
+    return `
     <div class="wish-item" style="animation-delay:${i*0.05}s">
       <div class="wish-art">${item.thumb?`<img src="${item.thumb}" alt="" />`:'♪'}</div>
       <div class="wish-data">
         <div class="wish-title">${item.album}</div>
         <div class="wish-artist">${item.artist}${item.year?' · '+item.year:''}</div>
+        <div class="wish-price-row">
+          <div class="wish-price">${formatPrice(item.lowestPrice, item.currency)}</div>
+          ${belowTarget?'<div class="wish-alert-hit">below target</div>':''}
+          ${item.numForSale?`<div class="wish-price-meta">${item.numForSale} for sale</div>`:''}
+        </div>
+        <div class="wish-alert-row">
+          <label class="wish-target-label">Target</label>
+          <input class="wish-target-input" type="number" min="0" step="0.01" value="${item.alertTarget === '' ? '' : item.alertTarget}" placeholder="0.00" onchange="setWishAlertTarget(${item.id}, this.value)" />
+          <button class="btn btn-ghost" style="font-size:9px;padding:5px 10px" onclick="refreshWishlistPrice(${item.id})">CHECK</button>
+          ${item.lastPriceCheck?`<div class="wish-price-meta">checked ${new Date(item.lastPriceCheck).toLocaleDateString()}</div>`:''}
+        </div>
       </div>
       <div class="wish-actions">
         <button class="btn btn-teal" style="font-size:9px;padding:5px 10px" onclick="moveWishToCrate(${item.id},event)">GOT IT</button>
         <button class="btn btn-danger" style="font-size:9px;padding:5px 10px" onclick="removeWish(${item.id},event)">REMOVE</button>
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 // ═══════════ CAMERA ═══════════
@@ -655,22 +1193,49 @@ function promptBarcode(){
 
 // ═══════════ WISHLIST SEARCH FROM SCAN ═══════════
 function openWishSearch(){
-  document.querySelector('[data-page="wishlist"]').click();
+  showPage('wishlist');
 }
 
-// ═══════════ EXPORT ═══════════
-function exportCollection(){
-  if(!collection.length){toast('Nothing to export');return;}
-  const rows=[['Album','Artist','Year','Format','Plays','Loaned','Notes'],...collection.map(c=>[c.album,c.artist,c.year,c.format,c.plays||0,c.loaned?c.loanedTo:'',c.notes||''])];
-  const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
-  const a=document.createElement('a');
-  a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
-  a.download='crate-collection.csv';
-  a.click();
-  toast('Exported!');
+function updateInstallButton(){
+  const btn=document.getElementById('install-app-btn');
+  if(!btn) return;
+  btn.hidden = !pendingInstallPrompt;
 }
 
-// ═══════════ MODAL HELPERS ═══════════
+async function installApp(){
+  if(!pendingInstallPrompt){
+    toast('Use your browser menu to add CRATE to your home screen');
+    return;
+  }
+  try{
+    await pendingInstallPrompt.prompt();
+    await pendingInstallPrompt.userChoice;
+  }catch(e){}
+  pendingInstallPrompt=null;
+  updateInstallButton();
+}
+
+async function registerPWA(){
+  if(!('serviceWorker' in navigator)) return;
+  try{
+    await navigator.serviceWorker.register('./sw.js');
+  }catch(e){
+    console.error('Service worker registration failed', e);
+  }
+}
+
+window.addEventListener('beforeinstallprompt', event=>{
+  event.preventDefault();
+  pendingInstallPrompt=event;
+  updateInstallButton();
+});
+
+window.addEventListener('appinstalled', ()=>{
+  pendingInstallPrompt=null;
+  updateInstallButton();
+  toast('CRATE installed');
+});
+
 function showModal(html){
   document.getElementById('active-modal').innerHTML=html;
   document.getElementById('modal-overlay').classList.add('open');
@@ -698,8 +1263,21 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
 
 // ═══════════ INIT ═══════════
 async function initApp(){
+  loadSharedViewFromHash();
+  normalizeCollectionOrder();
+  resetThemeColor();
+  resetDiscRotation(false);
   refreshUI();
+  updateInstallButton();
+  registerPWA();
   setStatus('ready — enter barcode or album title, or click CAMERA');
+  const wrap=document.getElementById('disc-wrap');
+  if(wrap){
+    wrap.addEventListener('pointerdown', startDiscDrag);
+    wrap.addEventListener('pointermove', moveDiscDrag);
+    wrap.addEventListener('pointerup', endDiscDrag);
+    wrap.addEventListener('pointercancel', endDiscDrag);
+  }
 }
 
 initApp();

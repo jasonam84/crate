@@ -1,0 +1,18 @@
+{
+  "name": "CRATE Music Library",
+  "short_name": "CRATE",
+  "description": "A calm record crate for scanning, sorting, and keeping your collection close.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5efe6",
+  "theme_color": "#f5efe6",
+  "icons": [
+    {
+      "src": "./crate-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
